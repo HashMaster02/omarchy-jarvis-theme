@@ -1,0 +1,17 @@
+{
+  "left": [
+    { "id": "jarvis-reactor", "type": "qml" },
+    { "id": "jarvis-hud", "type": "qml" },
+    { "id": "jarvis-ws-open", "type": "qml", "source": "~/.config/omarchy/bar/modules/jarvis-bracket.qml", "side": "open" },
+    { "id": "omarchy.workspaces" },
+    { "id": "jarvis-ws-close", "type": "qml", "source": "~/.config/omarchy/bar/modules/jarvis-bracket.qml", "side": "close" }
+  ],
+  "right": [
+    { "id": "jarvis-net-open", "type": "qml", "source": "~/.config/omarchy/bar/modules/jarvis-bracket.qml", "side": "open" },
+    { "id": "jarvis-net", "type": "qml" },
+    { "id": "jarvis-net-close", "type": "qml", "source": "~/.config/omarchy/bar/modules/jarvis-bracket.qml", "side": "close", "gap": 8 },
+    { "id": "jarvis-stats-open", "type": "qml", "source": "~/.config/omarchy/bar/modules/jarvis-bracket.qml", "side": "open" },
+    { "id": "jarvis-stats", "type": "qml" },
+    { "id": "jarvis-stats-close", "type": "qml", "source": "~/.config/omarchy/bar/modules/jarvis-bracket.qml", "side": "close" }
+  ]
+}

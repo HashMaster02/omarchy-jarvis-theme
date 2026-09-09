@@ -1,0 +1,14 @@
+# JARVIS bar surface. Merged over the generated shell.toml [bar] section
+# when the theme is applied (omarchy theme set jarvis).
+[bar]
+# Deep navy glass: slightly translucent so the wallpaper glows through.
+background       = "#07101a"
+background-alpha = 0.86
+text             = "#c8e6f5"
+# Modules calling attention to themselves (recording, updates, alerts)
+# light up in arc-reactor gold rather than red.
+active           = "#ffc857"
+scale-with-font  = true
+# A touch taller than stock so the HUD frame and meters have room.
+size-horizontal  = 30
+size-vertical    = 30

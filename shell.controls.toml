@@ -1,0 +1,29 @@
+# JARVIS control chrome: hover, focus and selection glow cyan instead of
+# the neutral foreground tint.
+[controls]
+normal-color        = "#c8e6f5"
+normal-fill-alpha   = 0.04
+normal-border       = "#c8e6f5"
+normal-border-width = 1
+normal-border-alpha = 0.35
+
+hover-cursor-color        = "#00d8ff"
+hover-cursor-fill-alpha   = 0.10
+hover-cursor-border       = "#00d8ff"
+hover-cursor-border-width = 1
+hover-cursor-border-alpha = 0.55
+
+focus-color        = "#00d8ff"
+focus-fill-alpha   = 0.10
+focus-border       = "#00d8ff"
+focus-border-width = 1
+focus-border-alpha = 0.55
+
+selected-color        = "#00d8ff"
+selected-fill-alpha   = 0.18
+selected-border       = "#00d8ff"
+selected-border-width = 0
+selected-border-alpha = 1.0
+
+pressed-fill-alpha   = 0.26
+selection-fill-alpha = 0.35
