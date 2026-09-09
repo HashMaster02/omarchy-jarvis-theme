@@ -1,0 +1,37 @@
+# JARVIS - Stark Industries HUD
+# Deep navy glass, arc-reactor cyan, hot-rod gold.
+mode = "dark"
+
+accent = "#00d8ff"
+selection = "#0f3a52"
+muted = "#2b4a63"
+
+background = "#0b1521"
+dark_background = "#07101a"
+darker_background = "#040a12"
+lighter_background = "#122236"
+
+foreground = "#c8e6f5"
+dark_foreground = "#5d7f99"
+light_foreground = "#a9cde0"
+bright_foreground = "#e6f7ff"
+
+# Active window border sweeps from reactor cyan to Iron Man gold.
+hyprland_active_border = "rgba(00d8ffee) rgba(ffc857ee) 45deg"
+hyprland_inactive_border = "rgba(1e3a52aa)"
+
+red = "#ff4b5c"
+yellow = "#ffc857"
+orange = "#ff9f43"
+green = "#3ddc97"
+cyan = "#00d8ff"
+blue = "#3fa9f5"
+magenta = "#b58cff"
+brown = "#8a5a3c"
+
+bright_red = "#ff7a86"
+bright_yellow = "#ffd97a"
+bright_green = "#6cf0b6"
+bright_cyan = "#7aeaff"
+bright_blue = "#7cc4ff"
+bright_magenta = "#d0b3ff"

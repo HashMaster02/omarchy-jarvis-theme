@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="188" viewBox="0 0 800 188">
+ <defs><filter id="g" x="-20%" y="-50%" width="140%" height="200%"><feGaussianBlur stdDeviation="4"/></filter></defs>
+ <g font-family="JetBrainsMono Nerd Font, JetBrainsMono NF, Noto Sans Mono" font-weight="800" font-size="88" text-anchor="middle" letter-spacing="6">
+  <text x="400" y="118" fill="#00d8ff" fill-opacity="0.6" filter="url(#g)">J.A.R.V.I.S</text>
+  <text x="400" y="118" fill="#00d8ff">J.A.R.V.I.S</text>
+ </g>
+ <g stroke="#ffc857" stroke-width="3" stroke-opacity="0.9">
+  <line x1="60" y1="164" x2="740" y2="164"/>
+ </g>
+ <g stroke="#00d8ff" stroke-width="3" stroke-opacity="0.8" fill="none">
+  <path d="M14 60 V14 H60"/><path d="M786 60 V14 H740"/><path d="M14 128 V174 H60"/><path d="M786 128 V174 H740"/>
+ </g>
+</svg>
