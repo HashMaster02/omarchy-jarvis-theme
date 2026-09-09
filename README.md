@@ -23,8 +23,22 @@ theme picker.
 - `unlock.png` — lock-screen wordmark
 - `icons.theme` — icon theme name (`Yaru-blue`)
 - `keyboard.rgb` — keyboard backlight colour, for keyboards Omarchy can drive
+- `screensaver/` — the stats screensaver and its installer (see below)
 - `src/` — generator scripts for every asset above, so the wallpapers and the
   fastfetch logo can be regenerated or tweaked (see `src/README.md`)
+
+## Screensaver
+
+The theme also ships the JARVIS stats screensaver, an animated arc reactor
+with live system telemetry. It is not applied by the theme installer; run:
+
+```bash
+~/.config/omarchy/themes/jarvis/screensaver/install.sh
+```
+
+See [`screensaver/README.md`](screensaver/README.md) for details and uninstall.
+
+![screensaver](preview-screensaver.png)
 
 ## Updating
 

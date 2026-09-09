@@ -1,0 +1,481 @@
+#!/usr/bin/env python3
+"""JARVIS screensaver: animated arc reactor plus live system telemetry.
+
+Standard library only. Exits on any keypress, on SIGTERM/SIGINT, or when the
+screensaver window loses focus (mirrors omarchy-screensaver behaviour).
+"""
+import curses, json, math, os, signal, subprocess, sys, threading, time
+
+REFRESH_STATS = 0.5   # seconds between stat samples
+FRAME_DT = 0.06       # ~16 fps animation
+CLASS = "org.omarchy.screensaver"
+
+# ---------------------------------------------------------------- telemetry --
+def read(path):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return ""
+
+def run(cmd, timeout=1.5):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+    except Exception:
+        return ""
+
+def cpu_times():
+    rows = []
+    for line in read("/proc/stat").splitlines():
+        if line.startswith("cpu"):
+            p = line.split()
+            vals = list(map(int, p[1:]))
+            idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
+            rows.append((p[0], sum(vals), idle))
+    return rows
+
+def cpu_usage(prev, cur):
+    out = []
+    for (n, t0, i0), (_, t1, i1) in zip(prev, cur):
+        dt = t1 - t0
+        out.append(0.0 if dt <= 0 else max(0.0, min(100.0, 100.0 * (1 - (i1 - i0) / dt))))
+    return out  # [total, core0, core1, ...]
+
+def meminfo():
+    m = {}
+    for line in read("/proc/meminfo").splitlines():
+        k, _, v = line.partition(":")
+        m[k] = int(v.split()[0]) * 1024
+    total = m.get("MemTotal", 1); avail = m.get("MemAvailable", 0)
+    st = m.get("SwapTotal", 0); sf = m.get("SwapFree", 0)
+    return total, total - avail, st, st - sf
+
+def cpu_model():
+    for line in read("/proc/cpuinfo").splitlines():
+        if line.startswith("model name"):
+            return line.split(":", 1)[1].strip().replace(" with Radeon Graphics", "")
+    return "unknown"
+
+def cpu_freq():
+    fs = []
+    for line in read("/proc/cpuinfo").splitlines():
+        if line.startswith("cpu MHz"):
+            fs.append(float(line.split(":")[1]))
+    return (sum(fs) / len(fs)) if fs else 0.0
+
+def temps():
+    out = {}
+    try:
+        data = json.loads(run(["sensors", "-j"]) or "{}")
+    except Exception:
+        data = {}
+    for chip, feats in data.items():
+        if not isinstance(feats, dict):
+            continue
+        for name, vals in feats.items():
+            if isinstance(vals, dict):
+                for k, v in vals.items():
+                    if k.endswith("_input") and k.startswith("temp") and isinstance(v, (int, float)):
+                        if "k10temp" in chip and name.lower().startswith("tctl"):
+                            out["CPU"] = v
+                        elif "amdgpu" in chip and name.lower() == "edge":
+                            out["iGPU"] = v
+                        elif "nvme" in chip and name.lower() == "composite":
+                            out["NVMe"] = v
+    return out
+
+def gpu():
+    s = run(["nvidia-smi", "--query-gpu=name,utilization.gpu,temperature.gpu,memory.used,memory.total",
+             "--format=csv,noheader,nounits"], timeout=2.0).strip()
+    if not s:
+        return None
+    try:
+        name, util, temp, mu, mt = [x.strip() for x in s.splitlines()[0].split(",")]
+        return {"name": name.replace("NVIDIA ", ""), "util": float(util), "temp": float(temp),
+                "mem_used": float(mu), "mem_total": float(mt)}
+    except Exception:
+        return None
+
+def gpu_names():
+    names = []
+    for line in run(["lspci"]).splitlines():
+        if "VGA" in line or "3D controller" in line:
+            desc = line.split(":", 2)[-1].strip()
+            if "[" in desc and "]" in desc:
+                desc = desc[desc.rfind("[") + 1:desc.rfind("]")]
+            names.append(desc.split(" / ")[0].strip())
+    return names
+
+def uptime():
+    s = float(read("/proc/uptime").split()[0] or 0)
+    d, r = divmod(int(s), 86400); h, r = divmod(r, 3600); m, _ = divmod(r, 60)
+    return f"{d}d {h:02d}h {m:02d}m" if d else f"{h:02d}h {m:02d}m"
+
+def battery():
+    for b in ("BAT0", "BAT1"):
+        cap = read(f"/sys/class/power_supply/{b}/capacity").strip()
+        if cap:
+            return int(cap), read(f"/sys/class/power_supply/{b}/status").strip()
+    return None
+
+def human(nbytes):
+    for unit in ("B", "K", "M", "G", "T"):
+        if nbytes < 1024 or unit == "T":
+            return f"{nbytes:.1f}{unit}" if unit != "B" else f"{int(nbytes)}B"
+        nbytes /= 1024
+
+def in_focus():
+    if os.environ.get("JARVIS_NO_FOCUS_CHECK"):   # for testing outside the screensaver window
+        return True
+    try:
+        out = run(["hyprctl", "activewindow", "-j"])
+        return json.loads(out or "{}").get("class") == CLASS
+    except Exception:
+        return True
+
+# ------------------------------------------------------------------- drawing --
+CY, CYB, WH, GD, DIM, RED, GRN = 1, 2, 3, 4, 5, 6, 7
+
+def setup_colors():
+    curses.start_color(); curses.use_default_colors()
+    if curses.COLORS >= 256:
+        pairs = {CY: 45, CYB: 159, WH: 231, GD: 220, DIM: 24, RED: 203, GRN: 84}
+    else:
+        pairs = {CY: curses.COLOR_CYAN, CYB: curses.COLOR_CYAN, WH: curses.COLOR_WHITE,
+                 GD: curses.COLOR_YELLOW, DIM: curses.COLOR_BLUE, RED: curses.COLOR_RED, GRN: curses.COLOR_GREEN}
+    for p, c in pairs.items():
+        curses.init_pair(p, c, -1)
+    CANVAS_ATTR.update({C_DIM: curses.color_pair(DIM), C_CY: curses.color_pair(CY),
+                        C_GD: curses.color_pair(GD) | curses.A_BOLD, C_COIL: curses.color_pair(CY) | curses.A_BOLD,
+                        C_HOT: curses.color_pair(CYB) | curses.A_BOLD, C_WH: curses.color_pair(WH) | curses.A_BOLD})
+
+def put(win, y, x, s, attr=0):
+    h, w = win.getmaxyx()
+    if 0 <= y < h and x < w and s:
+        if x < 0:
+            s = s[-x:]; x = 0
+        s = s[:w - x - 1] if x + len(s) >= w else s
+        try:
+            win.addstr(y, x, s, attr)
+        except curses.error:
+            pass
+
+def bar(width, frac, fill="█", empty="░"):
+    n = int(round(max(0.0, min(1.0, frac)) * width))
+    return fill * n + empty * (width - n)
+
+def load_attr(pct):
+    return curses.color_pair(RED if pct >= 85 else GD if pct >= 60 else CY)
+
+# ------------------------------------------------------------------ reactor --
+# The reactor is rasterised onto a braille canvas (2x4 dots per cell) and then
+# composited into characters, so rings are solid and rotation moves in
+# sub-character steps instead of jumping from cell to cell.
+CELL_AX = 2.05              # cell height / cell width for the screensaver font
+PIX_KX = CELL_AX / 2        # x stretch that makes a braille-pixel circle look round
+TAU = 2 * math.pi
+DOTS = ((0x01, 0x08), (0x02, 0x10), (0x04, 0x20), (0x40, 0x80))   # DOTS[dy][dx]
+
+# colour ids on the canvas, in ascending draw priority (ties go to the higher id)
+C_OFF, C_DIM, C_CY, C_GD, C_COIL, C_HOT, C_WH = range(7)
+CANVAS_ATTR = {}            # filled in by setup_colors (needs curses initialised)
+
+def _dither(x, y, level):
+    """Ordered 2x2 dither: level 0..4 = how many of every four pixels are lit."""
+    if level >= 4: return True
+    if level <= 0: return False
+    k = ((y & 1) << 1) | ((x ^ y) & 1)      # 0..3, ordered so lower levels nest
+    return k < level
+
+class Reactor:
+    """Cached geometry for one canvas size; render() draws one animation frame."""
+    _cache = {}
+
+    def __init__(self, cols, rows):
+        self.cols, self.rows = cols, rows
+        W, H = cols * 2, rows * 4
+        self.W, self.H = W, H
+        cx, cy = (W - 1) / 2, (H - 1) / 2
+        R = min(cy, cx / PIX_KX) - 0.5
+        self.R = R
+        base = bytearray(W * H)
+        rho = [0.0] * (W * H); ang = [0.0] * (W * H)
+        outer, dash, coil, core = [], [], [], []
+        # triangle: vertices on r = 0.44, apex up
+        verts = [(0.44 * math.cos(-TAU / 4 + e * TAU / 3), 0.44 * math.sin(-TAU / 4 + e * TAU / 3)) for e in range(3)]
+        edges = list(zip(verts, verts[1:] + verts[:1]))
+        stroke = max(0.022, 1.1 / R)   # half stroke width in R units (>= ~1 px)
+        for y in range(H):
+            dy = y - cy
+            for x in range(W):
+                i = y * W + x
+                dx = (x - cx) / PIX_KX
+                r = math.hypot(dx, dy) / R; a = math.atan2(dy, dx) % TAU
+                rho[i] = r; ang[i] = a
+                if 0.935 <= r <= 1.0:
+                    base[i] = C_DIM; outer.append(i)
+                elif 0.80 <= r < 0.935:
+                    # 24 ticks, every third one longer, tangential half width ~1px
+                    k = round(a / (TAU / 24)); da = a - k * TAU / 24
+                    inner = 0.83 if k % 3 == 0 else 0.875
+                    if r >= inner and abs(math.sin(da)) * r * R < 1.05:
+                        base[i] = C_CY
+                elif 0.74 <= r <= 0.79:
+                    dash.append(i)
+                elif 0.545 <= r <= 0.68:
+                    coil.append(i)
+                if r < 0.32:
+                    core.append(i)
+                if r < 0.50:
+                    px, py = dx / R, dy / R
+                    for (x0, y0), (x1, y1) in edges:
+                        ex, ey = x1 - x0, y1 - y0
+                        f = max(0.0, min(1.0, ((px - x0) * ex + (py - y0) * ey) / (ex * ex + ey * ey)))
+                        if math.hypot(px - (x0 + ex * f), py - (y0 + ey * f)) <= stroke:
+                            base[i] = C_WH; break
+        self.base, self.rho, self.ang = base, rho, ang
+        self.outer, self.dash, self.coil, self.core = outer, dash, coil, core
+        # per-cell list of the eight pixel indices that make up its braille glyph
+        self.cells = [[((cy4 * 4 + dy) * W + cx2 * 2 + dx, DOTS[dy][dx]) for dy in range(4) for dx in range(2)]
+                      for cy4 in range(rows) for cx2 in range(cols)]
+
+    @classmethod
+    def get(cls, cols, rows):
+        key = (cols, rows)
+        if key not in cls._cache:
+            cls._cache.clear(); cls._cache[key] = cls(cols, rows)
+        return cls._cache[key]
+
+    def render(self, t, load):
+        """Return rows of (col, text, colour-id) runs for animation time t."""
+        W = self.W; buf = bytearray(self.base); rho = self.rho; ang = self.ang
+        # gold scanner sweeping the outer ring, with a dithered tail behind it
+        head = (t * 0.9) % TAU
+        for i in self.outer:
+            d = (head - ang[i]) % TAU
+            if d < 0.45:
+                buf[i] = C_GD
+            elif d < 1.0 and _dither(i % W, i // W, 2):
+                buf[i] = C_GD
+            elif d < 1.0 and rho[i] > 0.965:
+                buf[i] = C_DIM
+        # counter-rotating dashed ring: 12 dashes of 30 degrees, 60% duty
+        rot = (-t * 0.6) % TAU; seg = TAU / 12
+        for i in self.dash:
+            if ((ang[i] - rot) % seg) < seg * 0.6:
+                buf[i] = C_CY
+        # ten coils, rotating slowly; outer winding brighter, colour follows load
+        rot = (t * 0.35) % TAU; seg = TAU / 10
+        bright = C_HOT if load > 50 else C_COIL
+        for i in self.coil:
+            f = ((ang[i] - rot) % seg) / seg
+            if 0.09 <= f <= 0.91:
+                buf[i] = bright if rho[i] >= 0.60 else C_CY
+        # pulsing core with a dithered glow halo
+        pulse = 0.5 + 0.5 * math.sin(t * (2.0 + load / 40))
+        core_r = 0.17 * (0.85 + 0.3 * pulse)
+        glow = 2 if load < 60 else 3
+        for i in self.core:
+            d = rho[i] / core_r
+            if d < 0.5:
+                buf[i] = C_WH
+            elif d < 1.0:
+                buf[i] = C_HOT
+            elif d < 1.2 and _dither(i % W, i // W, glow):
+                buf[i] = C_CY
+        # composite braille cells, merged into same-colour runs per row
+        rows = []; cols = self.cols; cells = self.cells
+        for r in range(self.rows):
+            runs = []; run_x = 0; run_s = ""; run_c = -1
+            for c in range(cols):
+                code = 0; counts = [0] * 7
+                for idx, bit in cells[r * cols + c]:
+                    v = buf[idx]
+                    if v:
+                        code |= bit; counts[v] += 1
+                if code:
+                    best = max(range(1, 7), key=lambda k: (counts[k], k))
+                    ch = chr(0x2800 + code)
+                else:
+                    best, ch = -1, " "
+                if best == run_c:
+                    run_s += ch
+                else:
+                    if run_s.strip(): runs.append((run_x, run_s, run_c))
+                    run_x, run_s, run_c = c, ch, best
+            if run_s.strip(): runs.append((run_x, run_s, run_c))
+            rows.append(runs)
+        return rows
+
+def draw_reactor(win, x0, y0, cols, rows, t, load):
+    """Draw the reactor into the cell box at (x0, y0) sized cols x rows."""
+    for r, runs in enumerate(Reactor.get(cols, rows).render(t, load)):
+        for x, s, cid in runs:
+            put(win, y0 + r, x0 + x, s, CANVAS_ATTR.get(cid, 0))
+
+def panel_box(win, y, x, h, w, title):
+    put(win, y, x, "╭" + "─" * (w - 2) + "╮", curses.color_pair(DIM))
+    for i in range(1, h - 1):
+        put(win, y + i, x, "│", curses.color_pair(DIM)); put(win, y + i, x + w - 1, "│", curses.color_pair(DIM))
+    put(win, y + h - 1, x, "╰" + "─" * (w - 2) + "╯", curses.color_pair(DIM))
+    put(win, y, x + 2, f" {title} ", curses.color_pair(GD) | curses.A_BOLD)
+
+# ---------------------------------------------------------------------- main --
+class Sampler(threading.Thread):
+    """Collects telemetry off the render thread so slow external commands
+    (sensors, nvidia-smi, hyprctl) never stall the animation."""
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.lock = threading.Lock()
+        self.stop = threading.Event()
+        prev = cpu_times()
+        self.state = {"usage": [0.0] * len(prev), "mem": meminfo(), "temps": {}, "gpu": None,
+                      "freq": 0.0, "bat": battery(), "up": uptime(), "load": "", "focused": True}
+        self._prev = prev
+
+    def snapshot(self):
+        with self.lock:
+            return dict(self.state)
+
+    def _set(self, **kw):
+        with self.lock:
+            self.state.update(kw)
+
+    def run(self):
+        tick = 0
+        while not self.stop.is_set():
+            cur = cpu_times(); usage = cpu_usage(self._prev, cur); self._prev = cur
+            self._set(usage=usage, mem=meminfo(), freq=cpu_freq(), load=" ".join(read("/proc/loadavg").split()[:3]))
+            if tick % 2 == 0:            # every ~1s
+                self._set(focused=in_focus())
+            if tick % 4 == 0:            # every ~2s: slow external commands
+                self._set(temps=temps(), gpu=gpu(), bat=battery(), up=uptime())
+            tick += 1
+            self.stop.wait(REFRESH_STATS)
+
+def main(stdscr):
+    curses.curs_set(0); stdscr.nodelay(True); stdscr.timeout(0)
+    setup_colors()
+    sys.stdout.write("\033]11;rgb:04/0a/12\007"); sys.stdout.flush()  # navy background
+
+    static = {
+        "host": os.uname().nodename, "kernel": os.uname().release, "cpu": cpu_model(),
+        "threads": os.cpu_count() or 0, "gpus": gpu_names(),
+        "os": next((l.split("=", 1)[1].strip().strip('"') for l in read("/etc/os-release").splitlines()
+                    if l.startswith("PRETTY_NAME=")), "Linux"),
+    }
+    sampler = Sampler(); sampler.start()
+    t0 = time.monotonic()
+    ticker = ("  ▶ STARK INDUSTRIES  ▶ J.A.R.V.I.S. ONLINE  ▶ ALL SYSTEMS NOMINAL  ▶ ARC REACTOR OUTPUT STABLE  "
+              "▶ TELEMETRY LINK ACTIVE  ▶ AWAITING INPUT, SIR  ")
+
+    try:
+        while True:
+            frame_start = time.monotonic(); t = frame_start - t0
+            if stdscr.getch() != -1:
+                return
+            st = sampler.snapshot()
+            if not st["focused"]:
+                return
+            usage, mem, tmp, g, freq, bat, up = (st["usage"], st["mem"], st["temps"], st["gpu"],
+                                                st["freq"], st["bat"], st["up"])
+
+            stdscr.erase(); H, W = stdscr.getmaxyx()
+            total = usage[0] if usage else 0.0
+            cores = usage[1:]
+
+            # header / footer
+            title = "J . A . R . V . I . S"
+            put(stdscr, 1, (W - len(title)) // 2, title, curses.color_pair(CYB) | curses.A_BOLD)
+            sub = "Just A Rather Very Intelligent System"
+            put(stdscr, 2, (W - len(sub)) // 2, sub, curses.color_pair(DIM))
+            clock = time.strftime("%H:%M:%S   %a %d %b %Y")
+            put(stdscr, 1, W - len(clock) - 3, clock, curses.color_pair(CY))
+            put(stdscr, 1, 3, f"⏻ {up}", curses.color_pair(CY))
+            off = int(t * 12) % len(ticker)
+            line = (ticker + ticker)[off:off + W - 4]
+            put(stdscr, H - 2, 2, line, curses.color_pair(DIM))
+
+            # panels
+            pw = max(30, min(38, (W - 8) // 3)); ph = H - 6; py = 4
+            lx = 2; rx = W - pw - 2
+            panel_box(stdscr, py, lx, ph, pw, "SYSTEM")
+            panel_box(stdscr, py, rx, ph, pw, "TELEMETRY")
+
+            # left: hardware
+            y = py + 2
+            def kv(k, v, attr=curses.color_pair(WH)):
+                nonlocal y
+                put(stdscr, y, lx + 2, f"{k:<9}", curses.color_pair(CY)); put(stdscr, y, lx + 11, str(v)[:pw - 14], attr); y += 1
+            kv("HOST", static["host"]); kv("OS", static["os"]); kv("KERNEL", static["kernel"]); y += 1
+            kv("CPU", static["cpu"]); kv("THREADS", static["threads"]); kv("CLOCK", f"{freq / 1000:.2f} GHz"); y += 1
+            for i, gn in enumerate(static["gpus"][:2]):
+                kv("GPU" if i == 0 else "", gn)
+            y += 1
+            kv("MEMORY", f"{human(mem[1])} / {human(mem[0])}")
+            if mem[2]:
+                kv("SWAP", f"{human(mem[3])} / {human(mem[2])}")
+            kv("LOAD", st["load"]); y += 1
+            if bat:
+                kv("POWER", f"{bat[0]}%  {bat[1]}", load_attr(100 - bat[0]))
+            for k, v in tmp.items():
+                kv(k + " °C", f"{v:.0f}", load_attr(v))
+
+            # right: live stats
+            y = py + 2; bw = pw - 16
+            put(stdscr, y, rx + 2, "CPU", curses.color_pair(CY)); put(stdscr, y, rx + 7, bar(bw, total / 100), load_attr(total))
+            put(stdscr, y, rx + 8 + bw, f"{total:5.1f}%", load_attr(total)); y += 2
+            for i, c in enumerate(cores):
+                if y >= py + ph - 8:
+                    break
+                put(stdscr, y, rx + 2, f"C{i:02d}", curses.color_pair(DIM)); put(stdscr, y, rx + 7, bar(bw, c / 100, "▰", "▱"), load_attr(c))
+                put(stdscr, y, rx + 8 + bw, f"{c:5.1f}%", load_attr(c)); y += 1
+            y += 1
+            mf = mem[1] / mem[0] if mem[0] else 0
+            put(stdscr, y, rx + 2, "MEM", curses.color_pair(CY)); put(stdscr, y, rx + 7, bar(bw, mf), load_attr(mf * 100))
+            put(stdscr, y, rx + 8 + bw, f"{mf * 100:5.1f}%", load_attr(mf * 100)); y += 1
+            if g:
+                y += 1
+                put(stdscr, y, rx + 2, "GPU", curses.color_pair(CY)); put(stdscr, y, rx + 7, bar(bw, g["util"] / 100), load_attr(g["util"]))
+                put(stdscr, y, rx + 8 + bw, f"{g['util']:5.1f}%", load_attr(g["util"])); y += 1
+                vf = g["mem_used"] / g["mem_total"] if g["mem_total"] else 0
+                put(stdscr, y, rx + 2, "VRAM", curses.color_pair(CY)); put(stdscr, y, rx + 7, bar(bw, vf), load_attr(vf * 100))
+                put(stdscr, y, rx + 8 + bw, f"{g['temp']:4.0f}°C", load_attr(g["temp"])); y += 1
+                put(stdscr, y, rx + 2, g["name"][:pw - 4], curses.color_pair(DIM)); y += 1
+
+            # centre: reactor sized to the free column (keeps a round aspect)
+            cx = W // 2; cy = (H - 1) // 2 + 1
+            avail_w = (rx - (lx + pw)) - 4
+            rrows = min(H - 8, int(avail_w / CELL_AX)); rcols = int(rrows * CELL_AX)
+            if rrows >= 10:
+                draw_reactor(stdscr, cx - rcols // 2, cy - rrows // 2, rcols, rrows, t, total)
+                lbl = f"REACTOR OUTPUT  {total:5.1f}%"
+                put(stdscr, cy - rrows // 2 + rrows + 1, cx - len(lbl) // 2, lbl, curses.color_pair(GD) | curses.A_BOLD)
+            stdscr.refresh()
+            # keep a steady frame cadence regardless of how long drawing took
+            time.sleep(max(0.0, FRAME_DT - (time.monotonic() - frame_start)))
+    finally:
+        sampler.stop.set()
+
+def _exit(*_):
+    raise SystemExit(0)
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _exit); signal.signal(signal.SIGHUP, _exit)
+    os.environ.setdefault("ESCDELAY", "25")
+    def cursor(invisible):
+        flag = "true" if invisible else "false"
+        if not run(["hyprctl", "eval", "hl.config({ cursor = { invisible = %s } })" % flag]).strip():
+            run(["hyprctl", "keyword", "cursor:invisible", flag])
+    # Terminals allocate the pty at 80x24 and resize once the compositor sizes
+    # the window; wait briefly so the first frame is drawn at full size.
+    deadline = time.time() + 2
+    while time.time() < deadline and os.get_terminal_size() == (80, 24):
+        time.sleep(0.02)
+    cursor(True)
+    try:
+        curses.wrapper(main)
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        cursor(False)
