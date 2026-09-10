@@ -4,7 +4,7 @@ mode = "dark"
 
 accent = "#00d8ff"
 selection = "#0f3a52"
-muted = "#2b4a63"
+muted = "#5b8bb0"
 
 background = "#0b1521"
 dark_background = "#07101a"
